@@ -1,53 +1,146 @@
 # 3 Cheatsheets
 
 ## 3.1 Flujo mecánico para problemas CUDA
-| Paso | Quién decide | Cómo |
-|---|---|---|
-| **1. Dimensionalidad** | El **problema** | 1D vector, 2D matriz, 3D volumen |
-| **2. Tamaño** | Los **datos** | N, M×N, M×N×K |
-| **3. Hilos/bloque** ⭐ | **Tú** + hardware | Múltiplo de 32, default 256 totales |
-| **4. Bloques/grid** | **Fórmula** | `ceil(tamaño / hilos_por_bloque)` |
-| **5. Lanzamiento** | Ejecutar | `kernel<<<grid, block>>>(args)` |
 
-**1. Dimensionalidad** — La forma natural del problema fija cuántas dimensiones tiene el grid: un vector pide 1D, una matriz 2D, un volumen 3D. No lo eliges tú, viene dado por la estructura de los datos.
 
-**2. Tamaño** — Los datos dan los números a cubrir: `N` elementos para un vector, `M×N` para una matriz, `M×N×K` para un volumen. Es el total de trabajo que el grid tiene que abarcar.
+1. **Dimensionalidad**: observar dimensionalidad del problema.
+    - no la define el usuario
+    - 1D vector, 2D matriz, 3D volumen 
 
-**3. Hilos por bloque** ⭐ — Aquí sí decides tú, con dos reglas: debe ser **múltiplo de 32** (tamaño del warp) y por defecto apunta a **256 threads totales** por bloque (256 en 1D, `16×16` en 2D, `8×8×8` en 3D). Es el único paso donde tienes libertad real; el resto se deduce de este.
+2. **Shape**: definir el shape de los datos dada la dimensionalidad
+    - `N` elementos para un vector, `M×N` para una matriz, `M×N×K` para un volumen. 
 
-**4. Bloques por grid** — Una vez fijados tamaño y hilos por bloque, los bloques salen por fórmula: `ceil(tamaño / hilos_por_bloque)` en cada dimensión. Garantiza que cubres todos los datos aunque el tamaño no sea múltiplo exacto, y los hilos sobrantes se descartan con un `if (i < N)` dentro del kernel.
+3. **Definir el nº de hilos por bloque**: debe ser **múltiplo de 32** (tamaño del warp)
+    - el resto de pasos se deduce a partir de este
+    - por defecto: **256 threads totales** 
 
-**5. Lanzamiento** — Solo queda escribir `kernel<<<grid, block>>>(args)` y la GPU se encarga del resto.
+        | Dim | Valor | Total threads |
+        |---|---|---|
+        | 1D | `256` | 256 |
+        | 2D | `dim3(16, 16)` | 256 |
+        | 3D | `dim3(8, 8, 8)` | 512 |
 
-#### Defaults de `blockDim`
+4. **Bloques por grid** el nº de bloques por grid se calcula: 
+    ```c
+    numBlocks = (shape + threadsPerBlock - 1) / threadsPerBlock;
+    ```
+    - los hilos sobrantes se descartan con un `if (i < N)` dentro del kernel.
 
-| Dim | Valor | Total threads |
-|---|---|---|
-| 1D | `256` | 256 |
-| 2D | `dim3(16, 16)` | 256 |
-| 3D | `dim3(8, 8, 8)` | 512 |
+5. **Lanzar el kernel**`kernel<<<grid, block>>>(args)`
 
-#### Fórmula del ceil (aplicada a cada dimensión)
-
-```c
-numBlocks = (tamaño + threadsPerBlock - 1) / threadsPerBlock;
-```
-
-#### Plantilla del kernel
 ```c
 __global__ void kernel(int N, ...) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) {              // ← check de límites SIEMPRE
+    if (i < N) {  // ← check de límites SIEMPRE
         // operar
     }
 }
 ```
 
-## 3.2 Flujo típico host ↔ device
+## 3.2 Kernels por dimensionalidad
 
-El esqueleto que repetirás en casi todos los programas CUDA:
+Mismo patrón en los tres casos: cada hilo calcula sus coordenadas globales, comprueba límites y opera sobre un elemento. La diferencia está en cuántos índices se calculan y cómo se aplana a memoria.
+
+#### 1D — vectores (`N` elementos)
 
 ```c
+__global__ void sumar1D(int N, const float *A, const float *B, float *C) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) C[i] = A[i] + B[i];
+}
+
+__global__ void multiplicar1D(int N, const float *A, const float *B, float *C) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) C[i] = A[i] * B[i];
+}
+```
+
+Lanzamiento:
+```c
+int threads = 256;
+int blocks  = (N + threads - 1) / threads;
+sumar1D<<<blocks, threads>>>(N, d_A, d_B, d_C);
+```
+
+#### 2D — matrices (`M` filas × `N` columnas, row-major)
+```
+Matriz 3×4:           Memoria lineal (12 elementos):
+[ a  b  c  d ]        [ a b c d | e f g h | i j k l ]
+[ e  f  g  h ]          fila 0     fila 1    fila 2
+[ i  j  k  l ]
+
+```
+```c
+__global__ void sumar2D(int M, int N, const float *A, const float *B, float *C) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y;   // fila
+    int j = blockIdx.x * blockDim.x + threadIdx.x;   // columna
+    if (j < N && i < M) {
+        int idx = i * N + j;
+        C[idx] = A[idx] + B[idx];
+    }
+}
+
+__global__ void multiplicar2D(int M, int N, const float *A, const float *B, float *C) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j < N && i < M) {
+        int idx = i * N + j;
+        C[idx] = A[idx] * B[idx];
+    }
+}
+```
+
+Lanzamiento:
+```c
+dim3 threads(16, 16);
+dim3 blocks((N + 15) / 16, (M + 15) / 16);
+sumar2D<<<blocks, threads>>>(M, N, d_A, d_B, d_C);
+```
+
+#### 3D — volúmenes (`M × N × K`)
+
+```c
+__global__ void sumar3D(int M, int N, int K,
+                        const float *A, const float *B, float *C) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int i = blockIdx.z * blockDim.z + threadIdx.z;
+    if (k < K && j < N && i < M) {
+        int idx = (i * N + j) * K + k;
+        C[idx] = A[idx] + B[idx];
+    }
+}
+
+__global__ void multiplicar3D(int M, int N, int K,
+                              const float *A, const float *B, float *C) {
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int i = blockIdx.z * blockDim.z + threadIdx.z;
+    if (k < K && j < N && i < M) {
+        int idx = (i * N + j) * K + k;
+        C[idx] = A[idx] * B[idx];
+    }
+}
+```
+
+Lanzamiento:
+```c
+dim3 threads(8, 8, 8);
+dim3 blocks((K + 7) / 8, (N + 7) / 8, (M + 7) / 8);
+sumar3D<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
+```
+
+## 3.3 Flujo típico host ↔ device
+
+```c
+// Kernel sencillo: C[i] = A[i] * 2
+__global__ void miKernel(int N, const float *A, float *C) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        C[i] = A[i] * 2.0f;
+    }
+}
+
 int main() {
     int N = 1 << 20;
     size_t bytes = N * sizeof(float);
@@ -59,8 +152,8 @@ int main() {
     
     // 2. Reservar memoria DEVICE
     float *d_A, *d_C;
-    cudaMalloc(&d_A, bytes);
-    cudaMalloc(&d_C, bytes);
+    cudaMalloc((void**)&d_A, bytes);
+    cudaMalloc((void**)&d_C, bytes);
     
     // 3. Copiar datos HOST → DEVICE
     cudaMemcpy(d_A, h_A, bytes, cudaMemcpyHostToDevice);
@@ -86,7 +179,7 @@ int main() {
 }
 ```
 
-## 3.3 Compilador (nvcc)
+## 3.4 Compilador (nvcc)
 
 `nvcc` es el compilador de CUDA. Separa el código en host (lo pasa a `gcc`/`clang`/`MSVC`) y device (lo compila a PTX/SASS).
 
@@ -125,7 +218,7 @@ nvcc -arch=sm_80 programa.cu              # target específico (Ampere)
 | `sm_89` | Ada Lovelace | RTX 4090 |
 | `sm_90` | Hopper | H100 |
 
-## 3.4 Especificadores y variables built-in
+## 3.5 Especificadores y variables built-in
 
 #### Especificadores de funciones
 
@@ -163,9 +256,18 @@ kernel<<<numBlocks, threadsPerBlock, sharedMemBytes>>>(args);
 kernel<<<numBlocks, threadsPerBlock, sharedMemBytes, stream>>>(args);
 ```
 
-## 3.5 Memoria del device
+## 3.6 Memoria del device
 
 #### Reservar y liberar
+
+```c
+cudaMalloc(&devPtr, bytes);
+```
+
+| Argumento | Significado |
+|---|---|
+| `&devPtr` | Dirección del puntero del device (se rellena con la dirección reservada) |
+| `bytes` | Tamaño en bytes a reservar (`N * sizeof(tipo)`) |
 
 ```c
 float* d_A;
@@ -203,7 +305,7 @@ cudaMemset(d_A, 0, N * sizeof(float));     // pone bytes a 0
 cudaMemcpyAsync(dst, src, bytes, direction, stream);
 ```
 
-## 3.6 Sincronización
+## 3.7 Sincronización
 
 | Función | Nivel | Cuándo usar |
 |---|---|---|
@@ -219,7 +321,7 @@ cudaMemcpyAsync(dst, src, bytes, direction, stream);
 - El lanzamiento de kernel es **asíncrono**: `cudaDeviceSynchronize()` después si necesitas esperar.
 - No hay sincronización entre bloques dentro de un kernel (sin `cooperative_groups`).
 
-## 3.7 Manejo de errores
+## 3.8 Manejo de errores
 
 Las funciones CUDA devuelven `cudaError_t`. Los errores asíncronos (en kernels) no se ven hasta que sincronizas.
 

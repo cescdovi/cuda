@@ -1,0 +1,40 @@
+# Binarios compilados (CUDA/C/C++)
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# Artefactos NVCC
+*.fatbin
+*.cubin
+*.ptx
+*.i
+*.ii
+*.gpu
+*.cudafe1.*
+*.cudafe2.*
+*.module_id
+
+# Ejecutables sin extensión generados desde fuentes .cu/.cpp
+1_modelo-programacion/ejercicios/SumaVectores
+1_modelo-programacion/ejercicios/SimpleMatrixSum
+1_modelo-programacion/ejercicios/cu_dot
+1_modelo-programacion/ejercicios/cu_saxpy
+1_modelo-programacion/ejercicios/cu_saxpy1
+1_modelo-programacion/ejercicios/deviceQuery/deviceQuery
+
+# Directorios de build
+build/
+bin/
+obj/
+
+# Editores / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
