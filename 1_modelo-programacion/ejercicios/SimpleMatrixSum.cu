@@ -28,7 +28,7 @@ __global__ void compute_kernel( unsigned int m, unsigned int n, float *d_A, floa
   
   if ( i < n && j < m) {
     int idx = i*n + j;
-    d_c[idx] = d_a[idx] + d_b[idx];
+    d_C[idx] = d_A[idx] + d_B[idx];
   }
 }
 
@@ -36,31 +36,31 @@ int cu_matrix_sum( unsigned int m, unsigned int n, unsigned int block_rows, unsi
 
   // 2. Reservar memoria en GPU
   float *d_A, *d_B, *d_C;
-  CUDA_SAFE_CALL(cudaMalloc((void**)&d_a, n * sizeof(float)));
-  CUDA_SAFE_CALL(cudaMalloc((void**)&d_b, n * sizeof(float)));
-  CUDA_SAFE_CALL(cudaMalloc((void**)&d_c, n * sizeof(float)));
+  CUDA_SAFE_CALL(cudaMalloc((void**)&d_A, m * n * sizeof(float)));
+  CUDA_SAFE_CALL(cudaMalloc((void**)&d_B, m * n * sizeof(float)));
+  CUDA_SAFE_CALL(cudaMalloc((void**)&d_C, m * n * sizeof(float)));
 
   // 3. Copiar los datos de CPU a GPU
-  CUDA_SAFE_CALL(cudaMemcpy(d_a, h_a, n * sizeof(float), cudaMemcpyHostToDevice));
-  CUDA_SAFE_CALL(cudaMemcpy(d_b, h_b, n * sizeof(float), cudaMemcpyHostToDevice));
-  
+  CUDA_SAFE_CALL(cudaMemcpy(d_A, h_A, m * n * sizeof(float), cudaMemcpyHostToDevice));
+  CUDA_SAFE_CALL(cudaMemcpy(d_B, h_B, m * n * sizeof(float), cudaMemcpyHostToDevice));
+
   //definir dimension del grid
-  int blocksize = 16 //256/16 = 16 por ser 2D
-  int row_blocks = (N + blocksize - 1) / blocksize
-  int col_blocks = (M + blocksize - 1) / blocksize
+  int blocksize = 16; //256/16 = 16 por ser 2D
+  int row_blocks = (n + blocksize - 1) / blocksize;
+  int col_blocks = (m + blocksize - 1) / blocksize;
 
   // 4. Lanzar el kernel
   dim3 dimGrid( row_blocks, col_blocks);
   dim3 dimBlock( blocksize, blocksize);
-  compute_kernel<<<dimGrid, dimBlock>>>(n, m, d_a, d_b, d_c);
+  compute_kernel<<<dimGrid, dimBlock>>>(m, n, d_A, d_B, d_C);
 
-  // 5.  Copiar resultados de GPU a CPU 
-  CUDA_SAFE_CALL(cudaMemcpy(h_c, d_c, n * sizeof(float), cudaMemcpyDeviceToHost));
+  // 5.  Copiar resultados de GPU a CPU
+  CUDA_SAFE_CALL(cudaMemcpy(h_C, d_C, m * n * sizeof(float), cudaMemcpyDeviceToHost));
 
   // 6. Liberar memoria en GPU
-  CUDA_SAFE_CALL(cudaFree(d_a));
-  CUDA_SAFE_CALL(cudaFree(d_b));
-  CUDA_SAFE_CALL(cudaFree(d_c));
+  CUDA_SAFE_CALL(cudaFree(d_A));
+  CUDA_SAFE_CALL(cudaFree(d_B));
+  CUDA_SAFE_CALL(cudaFree(d_C));
 
   return EXIT_SUCCESS;
 }

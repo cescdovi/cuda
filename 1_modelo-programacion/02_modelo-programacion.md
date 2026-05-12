@@ -231,6 +231,13 @@ Queremos procesar una matriz 6x6
 - `blockDim` = (3, 3) → **9 threads por bloque**
 - **Total: 36 threads** (matriz 6×6)
 
+``` 
+Matriz 3×4:           Memoria lineal (12 elementos):
+[ a  b  c  d ]        [ a b c d | e f g h | i j k l ]
+[ e  f  g  h ]          fila 0     fila 1    fila 2
+[ i  j  k  l ]
+```
+
 ```
                   blockIdx.x = 0          blockIdx.x = 1
                 ┌──────────────┐        ┌──────────────┐
