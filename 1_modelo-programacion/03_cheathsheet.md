@@ -36,7 +36,6 @@ __global__ void kernel(int N, ...) {
     }
 }
 ```
-
 ## 3.2 Kernels por dimensionalidad
 
 Mismo patrón en los tres casos: cada hilo calcula sus coordenadas globales, comprueba límites y opera sobre un elemento. La diferencia está en cuántos índices se calculan y cómo se aplana a memoria.
