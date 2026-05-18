@@ -3,43 +3,79 @@
 - 1.2 Arquitectura GPU
     - 1.2.1 CPU vs GPU: transistores para cómputo vs control
     - 1.2.2 SMs, CUDA cores, warps (modelo SIMT)
-    - 1.2.3 Jerarquía de memoria (registers, shared, global, constant)
+    - 1.2.3 Jerarquía de memoria física (registers, L1/shared, L2, DRAM)
 - 1.3 Qué es CUDA
-    - 1.3.1 Plataforma + modelo de programación + ISA
+    - 1.3.1 Plataforma + modelo de programación + ISA (PTX/SASS)
     - 1.3.2 Ecosistema: librerías y wrappers
     - 1.3.3 CUDA Toolkit
 - 1.4 Compute Capability y arquitecturas
+    - 1.4.1 Qué es CC y cómo evoluciona
+    - 1.4.2 Tabla orientativa (Pascal/Volta/Ampere/Hopper/Blackwell)
 - 1.5 Cuándo conviene GPGPU
 
 # 2 Modelo de programación de CUDA
-- 2.1 Idea general: abstracción sobre el hardware, escalabilidad
+- 2.1 Idea general
+    - 2.1.1 Abstracción sobre el hardware: SIMT vs SIMD
+    - 2.1.2 Flujo host/device: alloc → H2D → kernel → D2H → free
+    - 2.1.3 Asincronía: qué bloquea y qué no
+    - 2.1.4 Escalabilidad: mismo código, distintas GPUs
 - 2.2 Kernels
     - 2.2.1 Qué es un kernel
-    - 2.2.2 Sintaxis: __global__ y <<<grid, block>>>
+    - 2.2.2 Sintaxis: __global__, __device__, __host__
+    - 2.2.3 Lanzamiento: <<<grid, block, sharedMem, stream>>>
 - 2.3 Jerarquía de threads
     - 2.3.1 Thread → Block → Grid (1D/2D/3D)
     - 2.3.2 Variables built-in
     - 2.3.3 Cálculo de índice global
     - 2.3.4 Independencia de bloques → escalabilidad
-    - 2.3.5 Sincronización (__syncthreads, barreras entre kernels)
+    - 2.3.5 Límites por arquitectura
 - 2.4 Warps: del modelo lógico al hardware
     - 2.4.1 Por qué importa el warp al programar
     - 2.4.2 Elección del tamaño de bloque (múltiplos de 32)
-    - 2.4.3 Divergencia de warp (branches y rendimiento)
-    - 2.4.4 Sincronización implícita dentro del warp
-- 2.5 Ejemplos de cálculo de dimensiones
+    - 2.4.3 Divergencia de warp
+    - 2.4.4 Sincronización implícita dentro del warp (pre/post-Volta)
+- 2.5 Modelo de memoria
+    - 2.5.1 Visión general: scope y lifetime (programador vs hardware)
+    - 2.5.2 Tipos de memoria
+        - 2.5.2.1 Registros (per-thread)
+        - 2.5.2.2 Local memory (per-thread, en DRAM)
+        - 2.5.2.3 Shared memory (per-block, on-chip)
+        - 2.5.2.4 Global memory (per-grid, DRAM)
+        - 2.5.2.5 Constant memory
+        - 2.5.2.6 Texture / Surface memory
+        - 2.5.2.7 Cachés (L1, L2) transparentes
+    - 2.5.3 Qualifiers (__shared__, __constant__, __device__, __restrict__)
+    - 2.5.4 Unified Memory (cudaMallocManaged)
+    - 2.5.5 Patrones de acceso a global memory
+        - 2.5.5.1 Coalescing
+        - 2.5.5.2 Stride y misaligned access
+    - 2.5.6 Shared memory: bank conflicts y padding
+    - 2.5.7 Tabla resumen: scope, latencia, tamaño, lifetime
+- 2.6 Sincronización
+    - 2.6.1 __syncthreads (intra-block)
+    - 2.6.2 __syncwarp y warp-level primitives (__shfl_*, ballot)
+    - 2.6.3 Barreras entre kernels y cudaDeviceSynchronize
+    - 2.6.4 Atomics (atomicAdd, atomicCAS)
+- 2.7 Patrones de mapeo problema → grid/block
+    - 2.7.1 Un thread por elemento (1D, 2D)
+    - 2.7.2 Grid-stride loops
+    - 2.7.3 Cálculo de dimensiones (ceil, padding)
 
 # 3 Cheatsheets
-- 3.1 Compilador (nvcc)
-- 3.2 Especificadores y variables built-in
-- 3.3 Memoria del device (cudaMalloc, cudaMemcpy, ...)
-- 3.4 Sincronización
-- 3.5 Manejo de errores
-- 3.6 Flujo típico host ↔ device
-- 3.7 Warps: reglas prácticas (tamaño bloque, divergencia, occupancy)
+- 3.1 Compilador (nvcc): flags, arch, -G/-lineinfo
+- 3.2 Especificadores de función y variables built-in
+- 3.3 Gestión de memoria (cudaMalloc, cudaMemcpy, cudaFree, cudaMallocManaged)
+- 3.4 Qualifiers de memoria (__shared__, __constant__, __device__)
+- 3.5 Sincronización (host y device)
+- 3.6 Manejo de errores (CUDA_CHECK macro, cudaGetLastError)
+- 3.7 Flujo típico host ↔ device
+- 3.8 Warps: reglas prácticas (tamaño bloque, divergencia, occupancy)
+- 3.9 Patrones de acceso (coalescing, bank conflicts)
 
 # 4 Ejemplos
-- 4.1 Suma de matrices C = A + B
-- 4.2 Suma de vectores z = x + y (monolithic vs grid-stride)
+- 4.1 Suma de vectores z = x + y (monolithic vs grid-stride)
+- 4.2 Suma de matrices C = A + B (2D indexing)
 - 4.3 Producto matriz-vector c = A·v
-- 4.4 Patrón de cálculo de dimensiones (ceil)
+- 4.4 Producto matriz-matriz con tiling en shared memory
+- 4.5 Reduction (suma de un vector)
+- 4.6 Patrón de cálculo de dimensiones (ceil)

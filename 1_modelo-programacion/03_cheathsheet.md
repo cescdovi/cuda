@@ -1,42 +1,151 @@
-# 3 Cheatsheets
+# 3 Cheatsheets CUDA
 
-## 3.1 Flujo mecánico para problemas CUDA
+## 3.1 Las 5 reglas fundamentales
 
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1.  warp = 32 threads                                      │
+│      (siempre, en todas las GPUs NVIDIA)                    │
+│                                                             │
+│  2.  blockDim ≤ 1024 por restricción de HW                  │
+│      (y siempre múltiplo de 32)                             │
+│                                                             │
+│  3.  Un bloque va a UN SM                                   │
+│      (no se reparte; un SM tiene varios bloques)            │
+│                                                             │
+│  4.  nblocks = ceil(n / blockDim)                           │
+│      (para cubrir n elementos; habrá hilos sobrantes)       │
+│                                                             │
+│  5.  blockDim = 256 es buen valor por defecto               │
+└─────────────────────────────────────────────────────────────┘
+```
 
-1. **Dimensionalidad**: observar dimensionalidad del problema.
-    - no la define el usuario
-    - 1D vector, 2D matriz, 3D volumen 
+## 3.2 Flujo mecánico para diseñar un kernel
 
-2. **Shape**: definir el shape de los datos dada la dimensionalidad
-    - `N` elementos para un vector, `M×N` para una matriz, `M×N×K` para un volumen. 
+### 3.2.1 Paso 1 — Identificar la dimensionalidad del problema
 
-3. **Definir el nº de hilos por bloque**: debe ser **múltiplo de 32** (tamaño del warp)
-    - el resto de pasos se deduce a partir de este
-    - por defecto: **256 threads totales** 
+- La define la naturaleza del problema, no el programador
+- Tipos según dimensión:
+    - 1D → Vector → `N` elementos
+    - 2D → Matriz → `M × N`
+    - 3D → Volumen → `M × N × K`
 
-        | Dim | Valor | Total threads |
-        |---|---|---|
-        | 1D | `256` | 256 |
-        | 2D | `dim3(16, 16)` | 256 |
-        | 3D | `dim3(8, 8, 8)` | 512 |
+### 3.2.2 Paso 2 — Definir el shape de los datos
 
-4. **Bloques por grid** el nº de bloques por grid se calcula: 
+- Una vez conocida la dimensionalidad, declarar el tamaño en cada eje
+
+### 3.2.3 Paso 3 — Elegir threads por bloque (`blockDim`)
+
+- Debe ser **múltiplo de 32**
+- Por defecto, apuntar a **~256 threads totales por bloque**
+- Valores típicos según dimensión:
+    - 1D → `256` → 256 threads
+    - 2D → `dim3(16, 16)` → 256 threads
+    - 3D → `dim3(8, 8, 8)` → 512 threads
+- El resto de pasos se deduce a partir de aquí
+
+### 3.2.4 Paso 4 — Calcular el número de bloques (`gridDim`)
+
+- Fórmula del techo (ceiling division) para garantizar que todos los elementos quedan cubiertos:
     ```c
     numBlocks = (shape + threadsPerBlock - 1) / threadsPerBlock;
     ```
-    - los hilos sobrantes se descartan con un `if (i < N)` dentro del kernel.
+- Los hilos sobrantes del último bloque se descartan con `if (i < N)` dentro del kernel
+- Para 2D/3D aplicas la misma fórmula por cada eje:
+    ```c
+    dim3 gridDim((N + 15) / 16, (M + 15) / 16);   // ejemplo 2D
+    ```
 
-5. **Lanzar el kernel**`kernel<<<grid, block>>>(args)`
+### 3.2.5 Paso 5 — Decidir el patrón: 1 thread por elemento, o varios
 
-```c
-__global__ void kernel(int N, ...) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < N) {  // ← check de límites SIEMPRE
-        // operar
+- Opciones según tamaño del problema:
+    - `n` manejable (< 10M) → patrón **1 thread = 1 elemento** → kernel sin bucle
+    - `n` enorme (> 10M) → patrón **grid-stride loop** → kernel con bucle
+- Para empezar, **siempre usa 1 thread = 1 elemento**
+    - Es lo más simple
+
+### 3.2.6 Paso 6 — Lanzar el kernel y escribirlo
+
+- Estructura en el host:
+    ```cuda
+    kernel<<<gridDim, blockDim>>>(args);
+    ```
+- Estructura del kernel:
+    ```cuda
+    __global__ void kernel(int N, ...) {
+        int i = blockIdx.x * blockDim.x + threadIdx.x;
+        if (i < N) {           // ← check de límites SIEMPRE
+            // operar
+        }
     }
-}
-```
-## 3.2 Kernels por dimensionalidad
+    ```
+
+## 3.3 Plantilla universal (copy-paste)
+
+- En el host:
+    ```cuda
+    int blockDim = 256;
+    int nblocks  = (n + blockDim - 1) / blockDim;
+    kernel<<<nblocks, blockDim>>>(n, d_a, d_b, d_c);
+    ```
+- El kernel:
+    ```cuda
+    __global__ void kernel(int n, float *a, float *b, float *c) {
+        int idx = threadIdx.x + blockIdx.x * blockDim.x;
+        if (idx < n) {
+            c[idx] = a[idx] + b[idx];   // o lo que sea
+        }
+    }
+    ```
+- Cubre el ~80% de kernels básicos:
+    - Suma de vectores
+    - Saxpy
+    - Aplicar una función elemento a elemento
+    - Mapear cualquier operación 1-a-1
+
+## 3.4 Variante: grid-stride loop (para `n` enorme)
+
+- Solo necesario cuando lanzar `n` threads sería demasiado
+- Estructura del kernel:
+    ```cuda
+    __global__ void kernel(int n, float *a, float *b, float *c) {
+        int idx    = threadIdx.x + blockIdx.x * blockDim.x;
+        int stride = blockDim.x * gridDim.x;
+        for (int i = idx; i < n; i += stride) {
+            c[i] = a[i] + b[i];
+        }
+    }
+    ```
+
+## 3.5 Conceptos importantes (para tener en la cabeza, no para memorizar)
+
+### 3.5.1 Los tres niveles de concurrencia
+
+- Pregunta clave: *"¿Cuántos threads ejecutan a la vez?"*
+- Depende de qué entiendas por "a la vez":
+    - Cuántos **lanzas** → lo que tú decidas en `<<<...>>>`
+    - Cuántos están **vivos** en hardware → muchos miles (residentes)
+    - Cuántos **ejecutan instrucción este ciclo** → unos pocos miles (ejecutando)
+- Como programador, **no tienes que preocuparte de esto**
+    - La GPU se encarga
+
+### 3.5.2 Solo importan dos cosas como programador
+
+- Cuando escribes un kernel, solo te tienen que importar **dos cosas**:
+    - **`blockDim` múltiplo de 32** → para no desperdiciar threads del último warp
+    - **`nblocks` lo bastante grande** → para cubrir tu problema (`ceil(n / blockDim)`)
+- Todo lo demás (warps, SMs, schedulers, ocupación, residentes...) **la GPU lo gestiona sola**
+
+## 3.6 Cuándo te empezará a importar el resto
+
+- Solo cuando aparezca uno de estos síntomas:
+    - *"Mi kernel es lento"* → coalescencia, ocupación
+    - *"Da resultados raros"* → race conditions, sincronización
+    - *"Quiero optimizar más"* → shared memory, registros
+    - *"Compite con la CPU"* → memory bandwidth, latency hiding
+- Mientras no tengas esos problemas, **el modelo simple es suficiente**
+
+## 3.3 Kernels por dimensionalidad
 
 Mismo patrón en los tres casos: cada hilo calcula sus coordenadas globales, comprueba límites y opera sobre un elemento. La diferencia está en cuántos índices se calculan y cómo se aplana a memoria.
 
@@ -129,7 +238,7 @@ dim3 blocks((K + 7) / 8, (N + 7) / 8, (M + 7) / 8);
 sumar3D<<<blocks, threads>>>(M, N, K, d_A, d_B, d_C);
 ```
 
-## 3.3 Flujo típico host ↔ device
+## 3.4 Flujo típico host ↔ device
 
 ```c
 // Kernel sencillo: C[i] = A[i] * 2
@@ -178,7 +287,7 @@ int main() {
 }
 ```
 
-## 3.4 Compilador (nvcc)
+## 3.5 Compilador (nvcc)
 
 `nvcc` es el compilador de CUDA. Separa el código en host (lo pasa a `gcc`/`clang`/`MSVC`) y device (lo compila a PTX/SASS).
 
@@ -217,7 +326,7 @@ nvcc -arch=sm_80 programa.cu              # target específico (Ampere)
 | `sm_89` | Ada Lovelace | RTX 4090 |
 | `sm_90` | Hopper | H100 |
 
-## 3.5 Especificadores y variables built-in
+## 3.6 Especificadores y variables built-in
 
 #### Especificadores de funciones
 
@@ -255,7 +364,7 @@ kernel<<<numBlocks, threadsPerBlock, sharedMemBytes>>>(args);
 kernel<<<numBlocks, threadsPerBlock, sharedMemBytes, stream>>>(args);
 ```
 
-## 3.6 Memoria del device
+## 3.7 Memoria del device
 
 #### Reservar y liberar
 
@@ -304,7 +413,25 @@ cudaMemset(d_A, 0, N * sizeof(float));     // pone bytes a 0
 cudaMemcpyAsync(dst, src, bytes, direction, stream);
 ```
 
-## 3.7 Sincronización
+#### `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol`
+
+- Copian datos entre el host y una **variable global del device** (`__device__` o `__constant__`), identificándola por **nombre del símbolo** en lugar de por puntero. Son el puente estándar para leer/escribir escalares o estructuras pequeñas declaradas globalmente en la GPU, sin necesidad de `cudaMalloc`.
+
+```c
+cudaMemcpyToSymbol(symbol, src, bytes);    // host → device
+cudaMemcpyFromSymbol(dst, symbol, bytes);  // device → host
+```
+
+| Parámetro | Significado |
+|---|---|
+| `symbol` | Variable global del device (`__device__` / `__constant__`), pasada por nombre |
+| `src` / `dst` | Puntero en el host (origen en `To`, destino en `From`) |
+| `bytes` | Número de bytes a copiar (típicamente `sizeof(tipo)`) |
+| `offset` *(opcional)* | Desplazamiento en bytes dentro del símbolo (por defecto 0) |
+| `kind` *(opcional)* | Dirección de la copia (por defecto la correcta para cada función) |
+
+
+## 3.8 Sincronización
 
 | Función | Nivel | Cuándo usar |
 |---|---|---|
@@ -320,7 +447,7 @@ cudaMemcpyAsync(dst, src, bytes, direction, stream);
 - El lanzamiento de kernel es **asíncrono**: `cudaDeviceSynchronize()` después si necesitas esperar.
 - No hay sincronización entre bloques dentro de un kernel (sin `cooperative_groups`).
 
-## 3.8 Manejo de errores
+## 3.9 Manejo de errores
 
 Las funciones CUDA devuelven `cudaError_t`. Los errores asíncronos (en kernels) no se ven hasta que sincronizas.
 
