@@ -214,7 +214,7 @@ __global__ void sumar2D(int M, int N, const float *A, const float *B, float *C) 
     int i = blockIdx.y * blockDim.y + threadIdx.y;   // fila
     int j = blockIdx.x * blockDim.x + threadIdx.x;   // columna
     if (j < N && i < M) {
-        int idx = i * N + j;
+        int idx = i * N + j; //i_global * n_cols + j_global
         C[idx] = A[idx] + B[idx];
     }
 }

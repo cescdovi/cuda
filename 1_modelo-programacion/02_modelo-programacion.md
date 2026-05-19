@@ -25,7 +25,7 @@ Idea clave: en vez de asignar trabajo a cores específicos, **declaras mucho tra
     - **Device**: la GPU y su VRAM
 - Cada una tiene su propio espacio de memoria, su propio flujo de control y sus propios punteros
 - Un puntero del host no es desreferenciable desde el device y viceversa (salvo Unified Memory, que veremos en 2.5.4)
-![alt text](1_modelo-programacion/images/cpu-gpu.png)
+![alt text](images/cpu-gpu.png)
 
 Consecuencia práctica: la mayoría de errores de principiante vienen de confundir punteros host con punteros device.
 
@@ -158,7 +158,7 @@ CUDA organiza los threads en una **jerarquía de tres niveles** que refleja cóm
     - Avanzan en lockstep: sincronizados paso a paso, ejecutando exactamente la misma instrucción en el mismo ciclo de reloj
     - Detalle de hardware, lo veremos en 2.4
 
-![alt text](1_modelo-programacion/images/thread-hierachy.png)
+![alt text](images/thread-hierachy.png)
 
 #### Dimensionalidad: 1D, 2D o 3D
 
@@ -223,7 +223,7 @@ Configuración:
 - `blockDim.x` = 4 → **4 threads por bloque**
 - **Total: 8 threads**
 
-![alt text](1_modelo-programacion/images/thread-indexing.png)
+![alt text](images/thread-indexing.png)
 
 #### Ejemplo visual (2D)
 
@@ -670,9 +670,9 @@ Cada tipo de memoria se caracteriza por dos preguntas:
 
 - **Scope**: ¿quién puede acceder? (un thread, un bloque, todo el grid)
 - **Lifetime**: ¿cuánto vive? (un kernel, la aplicación entera)
-![alt text](1_modelo-programacion/images/memory-scope.png)
-![alt text](1_modelo-programacion/images/relative-memory-speed.png)
-![alt text](1_modelo-programacion/images/gpu-architecture.png)
+![alt text](images/memory-scope.png)
+![alt text](images/relative-memory-speed.png)
+![alt text](images/gpu-architecture.png)
 
 Consecuencia práctica: si dos threads necesitan cooperar, mira en qué nivel viven:
 
@@ -820,22 +820,51 @@ free(h_A);                                        // 6. liberar host
 
 El **pitch** es el ancho real de cada fila en bytes (incluye padding), que suele ser mayor que `width * sizeof(T)`. Hay que usarlo para indexar correctamente.
 
+---
+
 #### Acceso a variables `__device__` / `__constant__` desde host
 
-Cuando declaras una variable global en device (no asignada con `cudaMalloc`), no puedes usar `cudaMemcpy` directamente con su nombre. Hay funciones específicas:
+Una variable declarada con `__device__` o `__constant__` a nivel global no se reserva con `cudaMalloc`: la crea el compilador dentro del binario del device. Desde el host su nombre **no es un puntero usable**, es un *símbolo* que el runtime tiene que traducir a la dirección real. Por eso `cudaMemcpy(d_var, ...)` falla, y CUDA expone una familia de funciones específicas para leer y escribir esas variables.
 
-| Función | Uso |
-|---|---|
-| `cudaMemcpyToSymbol(symbol, src, size)` | Copia host → variable `__device__` / `__constant__` |
-| `cudaMemcpyFromSymbol(dst, symbol, size)` | Copia variable `__device__` / `__constant__` → host |
-| `cudaGetSymbolAddress(&ptr, symbol)` | Obtiene la dirección device de un símbolo (para pasársela a kernels o `cudaMemcpy` normal) |
+---
+- **`cudaMemcpyToSymbol(symbol, src, size)`**: función que sirve para copiar datos desde la memoria del host (CPU) hacia variables declaradas en el device (GPU), variables tipo `__device__`.
+    1. Declarar variable en el device para reservar memoria en GPU.
+    2. Copiar contenido de una var. del host al device.
+
+Params
+- `symbol`: nombre de la variable `__device__` / `__constant__` (sin `&`).
+- `src`: puntero host con los datos.
+- `size`: bytes a copiar.
+
+---
+
+- **`cudaMemcpyFromSymbol(dst, symbol, size)`**: función que sirve para copiar datos desde una variable declarada en el device (GPU), tipo `__device__` o `__constant__`, de vuelta hacia la memoria del host (CPU). Es la operación inversa de `cudaMemcpyToSymbol`.
+    1. Tener una variable `__device__` / `__constant__` con datos (escritos por un kernel o por `cudaMemcpyToSymbol`).
+    2. Copiar su contenido del device al host para inspeccionarlo o reutilizarlo en CPU.
+
+Params
+- `dst`: puntero host donde escribir el resultado.
+- `symbol`: nombre de la variable `__device__` / `__constant__` (sin `&`).
+- `size`: bytes a copiar.
+
+---
+
+- **`cudaGetSymbolAddress(&ptr, symbol)`**: función que devuelve la dirección real en device de una variable `__device__` / `__constant__`, de manera que a partir de ese momento puedas tratarla como un puntero device normal.
+    1. Declarar variable `__device__` / `__constant__` a nivel global.
+    2. Obtener su dirección device para pasarla a un kernel o usarla con `cudaMemcpy` corriente.
+
+Params
+- `&ptr`: dirección de un `void*` donde el runtime escribe el puntero device resultante.
+- `symbol`: nombre de la variable `__device__` / `__constant__` (sin `&`).
+
+---
 
 ```c
-__constant__ float d_coeffs[16];                  // variable en constant memory
+__constant__ float d_coeffs[16];  // vive en constant memory
 
-float h_coeffs[16] = { ... };
-cudaMemcpyToSymbol(d_coeffs, h_coeffs,            // copia host → constant
-                   16 * sizeof(float));
+float h_coeffs[16] = { /* ... */ };
+cudaMemcpyToSymbol(d_coeffs, h_coeffs, // host → constant
+                   sizeof(d_coeffs));
 ```
 
 #### Características importantes
@@ -965,7 +994,7 @@ Una vez tienes varios threads operando sobre datos compartidos, necesitas **coor
 
 ### 2.6.1 `__syncthreads` (intra-block)
 
-`__syncthreads()` es una **barrera** que pausa todos los threads del bloque hasta que **todos** han llegado al mismo punto. Después, todos siguen.
+- `__syncthreads()` es una **barrera** que pausa todos los threads del bloque hasta que **todos** han llegado al mismo punto. Después, todos siguen.
 
 ```c
 __global__ void kernel(...) {
