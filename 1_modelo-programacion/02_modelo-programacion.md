@@ -190,6 +190,36 @@ Las cuatro variables son `dim3`, así que tienen tres componentes `.x`, `.y`, `.
     - Fórmula: `blockIdx * blockDim + threadIdx`
 - Un bloque 1D tiene `blockDim.y == blockDim.z == 1`
 
+#### Convención de ejes: `.x` = columna (horizontal), `.y` = fila (vertical)
+
+CUDA sigue una **convención gráfica tipo pantalla/imagen**, no la convención matricial matemática:
+
+- Origen en la esquina **superior izquierda**
+- `.x` crece hacia la **derecha** → mapea a la **columna**
+- `.y` crece hacia **abajo** → mapea a la **fila**
+- `.z` crece hacia adentro (profundidad)
+
+```
+            x=0   x=1   x=2
+          ┌─────┬─────┬─────┐
+     y=0  │     │     │     │   ← y avanza hacia abajo
+          ├─────┼─────┼─────┤
+     y=1  │     │     │     │
+          ├─────┼─────┼─────┤
+     y=2  │     │     │     │
+          └─────┴─────┴─────┘
+```
+
+Por eso al indexar una matriz `A` de ancho `W` almacenada en row-major, `j` (la fila) va primero:
+
+```c
+int i = blockIdx.x * blockDim.x + threadIdx.x;   // columna
+int j = blockIdx.y * blockDim.y + threadIdx.y;   // fila
+A[j * W + i];                                    // fila primero, columna después
+```
+
+> En matemáticas suele escribirse `(fila, columna) = (i, j)`. En CUDA, `(i, j) = (columna, fila)` porque `i` viene del eje `.x`. Es la principal fuente de confusión al pasar de pseudocódigo matricial a kernels 2D.
+
 #### Dado un thread, calcular (FILA, COLUMNA) → (I, J) global que le toca
 
 ```c

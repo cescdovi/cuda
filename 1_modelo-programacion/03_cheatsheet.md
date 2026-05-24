@@ -105,21 +105,25 @@ int main() {
     float *h_b = (float*)malloc(bytes);
     float *h_c = (float*)malloc(bytes);
 
-    // 1. 
+    // reservar memoria en DEVICE
     float *d_a, *d_b, *d_c;
     cudaMalloc(&d_a, bytes);
     cudaMalloc(&d_b, bytes);
     cudaMalloc(&d_c, bytes);
 
+    //copiar datos HOST -> DEVICE
     cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice);
     cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice);
 
+    // ejecutar kernel
     int blockDim = 256;
     int nblocks  = (n + blockDim - 1) / blockDim;
     kernel<<<nblocks, blockDim>>>(n, d_a, d_b, d_c);
 
+    // copiar DEVICE --> HOST
     cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost);
 
+    // liberar memoria
     cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
     free(h_a); free(h_b); free(h_c);
     return 0;
@@ -181,6 +185,8 @@ __global__ void kernel(int n, const float *a, const float *b, float *c) {
 
 Mismo patrón en los tres casos: cada hilo calcula sus coordenadas globales, comprueba límites y opera sobre un elemento. La diferencia está en cuántos índices se calculan y cómo se aplana a memoria.
 
+> **Convención de ejes (pantalla, no matricial):** `.x` = columna (horizontal), `.y` = fila (vertical), `.z` = profundidad. Origen arriba-izquierda, `.y` crece hacia abajo. Por eso al indexar row-major es `A[fila * W + columna]` → `A[y * W + x]`. Ver [02_modelo-programacion.md](02_modelo-programacion.md#L193) §2.3.3 para el detalle.
+
 #### 3.6.1 1D — vectores (`N` elementos)
 
 ```c
@@ -214,7 +220,7 @@ __global__ void sumar2D(int M, int N, const float *A, const float *B, float *C) 
     int i = blockIdx.y * blockDim.y + threadIdx.y;   // fila
     int j = blockIdx.x * blockDim.x + threadIdx.x;   // columna
     if (j < N && i < M) {
-        int idx = i * N + j; //i_global * n_cols + j_global
+        int idx = i * N + j; 
         C[idx] = A[idx] + B[idx];
     }
 }
@@ -417,17 +423,30 @@ kernel<<<numBlocks, threadsPerBlock, sharedMemBytes, stream>>>(args);
 
 ### 3.9 Memoria del device (API)
 
+La API de memoria de CUDA cubre tres bloques: **reservar/liberar** memoria en device, host pinned o unified; **mover datos** entre host y device (síncrono o asíncrono); e **inicializar** regiones de memoria. Todas las funciones devuelven `cudaError_t` y deben envolverse en `CUDA_CHECK`.
+
+> **Convención de nombres**: por claridad se suele prefijar `d_` los punteros device (`d_A`) y `h_` los punteros host (`h_A`). El compilador no lo impone, pero **mezclarlos es la fuente #1 de errores `invalid device pointer`** (un puntero host pasado a un kernel, o desreferenciar un puntero device desde la CPU).
+
 #### 3.9.1 Reservar y liberar
+
+##### `cudaMalloc` — reservar en VRAM
 
 ```c
 cudaMalloc(&devPtr, bytes);
 ```
 
-Reserva memoria en la VRAM del device. El puntero resultante solo es válido desde el device (o como argumento a APIs CUDA), nunca desreferenciable desde el host.
+Reserva un bloque contiguo de **memoria global** (VRAM) en el device activo. El puntero resultante vive en el espacio de direcciones del device:
+
+- Es válido como argumento a kernels y a otras APIs CUDA (`cudaMemcpy`, `cudaFree`...).
+- **NO** se puede desreferenciar desde el host: hacerlo causa segfault, no error CUDA.
+- La memoria **no está inicializada** (contiene basura): si necesitas ceros, usa `cudaMemset` o `cudaMemcpy` después.
+- La reserva es **síncrona** y relativamente cara (~µs): nunca llamar a `cudaMalloc` dentro del *hot path*; reservar una vez y reutilizar.
 
 ```c
-float* d_A;
-cudaMalloc(&d_A, N * sizeof(float));   // reserva
+float *d_A;
+CUDA_CHECK(cudaMalloc(&d_A, N * sizeof(float)));   // reserva N floats en VRAM
+// ❌ printf("%f", d_A[0]);   // segfault: d_A no es desreferenciable desde host
+// ✅ cudaMemcpy(h_A, d_A, ...) para leer
 ```
 
 | Parámetro | Significado |
@@ -435,29 +454,46 @@ cudaMalloc(&d_A, N * sizeof(float));   // reserva
 | `&devPtr` | Dirección del puntero (se rellena con la dirección reservada) |
 | `bytes` | Tamaño en bytes (`N * sizeof(tipo)`) |
 
+##### `cudaFree` — liberar memoria del device
+
 ```c
 cudaFree(devPtr);
 ```
 
-Libera memoria reservada previamente con `cudaMalloc` / `cudaMallocManaged`.
+Libera memoria reservada previamente con `cudaMalloc` o `cudaMallocManaged`:
+
+- Es **síncrono**: bloquea al host hasta liberar.
+- Pasar `nullptr` es seguro (no-op), igual que `free` en C.
+- **No** liberar memoria reservada con `cudaMallocHost` (para eso está `cudaFreeHost`).
+- Doble free → error CUDA, no UB.
 
 ```c
-cudaFree(d_A);
+CUDA_CHECK(cudaFree(d_A));
+d_A = nullptr;                  // buena práctica: invalidar el puntero
 ```
 
 | Parámetro | Significado |
 |---|---|
 | `devPtr` | Puntero a liberar |
 
+##### `cudaMallocHost` — memoria pinned en host
+
 ```c
 cudaMallocHost(&hostPtr, bytes);
 ```
 
-Reserva memoria **pinned** en host (no paginable). Transferencias H↔D mucho más rápidas y permite `cudaMemcpyAsync`.
+Reserva memoria en el host marcada como **pinned** (page-locked): el SO no puede paginarla a disco. Tiene dos efectos clave:
+
+- Las transferencias `cudaMemcpy` H↔D son **2-3× más rápidas** (el driver puede usar DMA directo sin buffer intermedio).
+- Es **requisito** para que `cudaMemcpyAsync` sea realmente asíncrono (con memoria paginable, `cudaMemcpyAsync` se degrada a copia síncrona).
+
+Tiene también un coste: reduce la memoria paginable disponible al SO. Reservar gigabytes pinned puede degradar todo el sistema. Liberar con `cudaFreeHost`, no con `free`.
 
 ```c
-float* h_A;
-cudaMallocHost(&h_A, N * sizeof(float));
+float *h_A;
+CUDA_CHECK(cudaMallocHost(&h_A, N * sizeof(float)));   // pinned: rápido + async-ready
+// ... usar h_A como un puntero normal del host ...
+CUDA_CHECK(cudaFreeHost(h_A));
 ```
 
 | Parámetro | Significado |
@@ -465,16 +501,28 @@ cudaMallocHost(&h_A, N * sizeof(float));
 | `&hostPtr` | Dirección del puntero del host |
 | `bytes` | Tamaño en bytes |
 
+##### `cudaMallocManaged` — Unified Memory
+
 ```c
 cudaMallocManaged(&ptr, bytes);
 ```
 
-Reserva memoria **unified**: un único puntero accesible desde host y device, con migración automática de páginas.
+Reserva memoria **unified**: un único puntero accesible desde host y device, con migración automática de páginas gestionada por el driver. Cuando el host accede, las páginas se migran a RAM; cuando el device accede, se migran a VRAM.
+
+- **Ventaja**: simplifica el código drásticamente (no `cudaMemcpy` explícitos, ideal para prototipado o estructuras complejas con punteros).
+- **Coste**: cada page fault dispara una migración (latencia alta). En kernels optimizados suele ser **más lento** que `cudaMalloc + cudaMemcpy` manual.
+- **Requiere sincronización**: tras un lanzamiento de kernel, llamar a `cudaDeviceSynchronize()` antes de leer desde host para evitar race conditions con la migración.
 
 ```c
-float* p;
-cudaMallocManaged(&p, N * sizeof(float));
-// se puede usar tanto desde host como desde kernel
+float *p;
+CUDA_CHECK(cudaMallocManaged(&p, N * sizeof(float)));
+
+for (int i = 0; i < N; i++) p[i] = i;    // host escribe → páginas en RAM
+kernel<<<grid, block>>>(p, N);            // kernel accede → migración automática a VRAM
+CUDA_CHECK(cudaDeviceSynchronize());     // imprescindible antes de leer desde host
+printf("%f\n", p[0]);                    // host lee → migración de vuelta a RAM
+
+CUDA_CHECK(cudaFree(p));
 ```
 
 | Parámetro | Significado |
@@ -482,32 +530,53 @@ cudaMallocManaged(&p, N * sizeof(float));
 | `&ptr` | Dirección del puntero |
 | `bytes` | Tamaño en bytes |
 
+##### Tabla comparativa de reservas
+
+| Función | Dónde vive | Acceso host | Acceso device | Velocidad H↔D | Cuándo usar |
+|---|---|---|---|---|---|
+| `cudaMalloc` | VRAM | ❌ | ✓ directo | — (requiere copia) | Caso por defecto: máximo control |
+| `cudaMallocHost` | RAM pinned | ✓ directo | ❌ (requiere copia) | 🚀 Muy rápida | Buffers de transferencia, streams |
+| `cudaMallocManaged` | Unified (migra) | ✓ con migración | ✓ con migración | Automática (con page faults) | Prototipado, estructuras con punteros |
+
 #### 3.9.2 Copiar datos
 
 ```c
 cudaMemcpy(dst, src, bytes, direction);
 ```
 
-Copia síncrona entre host y device (o dentro del device). Bloquea al host hasta completar.
+Copia **síncrona** de datos entre regiones de memoria. Bloquea al host hasta que la copia termine. Es la primitiva de transferencia más usada:
+
+- La dirección de la copia debe declararse explícitamente con un enum `cudaMemcpyKind` (ver tabla inferior).
+- Las copias H↔D viajan por el **bus PCIe** (~16-32 GB/s en PCIe 4.0): mucho más lento que el ancho de banda de VRAM (~1-3 TB/s). Por eso la regla es **transferir lo mínimo, una sola vez, fuera del hot path**.
+- Las copias D→D son intra-VRAM y por tanto rapidísimas.
+- Si `dst` y `src` se solapan → comportamiento indefinido (igual que `memcpy` de C).
 
 ```c
-cudaMemcpy(d_A, h_A, N * sizeof(float), cudaMemcpyHostToDevice);
+// H → D: subir input a la GPU antes de lanzar el kernel
+CUDA_CHECK(cudaMemcpy(d_A, h_A, N * sizeof(float), cudaMemcpyHostToDevice));
+
+kernel<<<grid, block>>>(d_A, d_B, N);
+
+// D → H: bajar resultado a la CPU
+CUDA_CHECK(cudaMemcpy(h_B, d_B, N * sizeof(float), cudaMemcpyDeviceToHost));
 ```
 
 | Parámetro | Significado |
 |---|---|
-| `dst` | Destino |
-| `src` | Origen |
+| `dst` | Puntero al destino |
+| `src` | Puntero al origen |
 | `bytes` | Tamaño en bytes |
 | `direction` | Dirección de la copia (ver tabla) |
 
-| Dirección | Significado |
-|---|---|
-| `cudaMemcpyHostToDevice` | CPU → GPU |
-| `cudaMemcpyDeviceToHost` | GPU → CPU |
-| `cudaMemcpyDeviceToDevice` | GPU → GPU |
-| `cudaMemcpyHostToHost` | CPU → CPU |
-| `cudaMemcpyDefault` | Inferida (requiere UVA) |
+| Dirección | Significado | Velocidad típica |
+|---|---|---|
+| `cudaMemcpyHostToDevice` | CPU → GPU (vía PCIe) | ~16-32 GB/s |
+| `cudaMemcpyDeviceToHost` | GPU → CPU (vía PCIe) | ~16-32 GB/s |
+| `cudaMemcpyDeviceToDevice` | GPU → GPU (intra-VRAM) | ~1-3 TB/s |
+| `cudaMemcpyHostToHost` | CPU → CPU (equivalente a `memcpy`) | RAM bandwidth |
+| `cudaMemcpyDefault` | Inferida desde los punteros (requiere UVA) | Según ruta real |
+
+> **Regla de oro**: cada `cudaMemcpy` H↔D es muy caro. Si tu kernel tarda 0.1 ms y tu copia 10 ms, la GPU está al 1 % de utilización. Reorganiza el pipeline para amortizar las copias entre muchos kernels.
 
 #### 3.9.3 Inicializar memoria
 
@@ -515,15 +584,27 @@ cudaMemcpy(d_A, h_A, N * sizeof(float), cudaMemcpyHostToDevice);
 cudaMemset(devPtr, value, bytes);
 ```
 
-Pone `bytes` bytes a un valor (típicamente 0). Funciona a nivel de byte, **no de elemento** (por eso solo es útil para `0` o patrones byte-uniformes).
+Pone los primeros `bytes` bytes de `devPtr` al valor `value`. Operación equivalente a `memset` de C, pero en VRAM. **Atención al gotcha clásico**:
+
+- `value` se interpreta como **byte** (0-255), no como elemento del tipo de dato.
+- Por tanto solo es útil para patrones byte-uniformes: `0`, `0xFF` (todos los bits a 1), o constantes con todos los bytes iguales.
+- `cudaMemset(d_A, 1, N * sizeof(float))` **NO** pone los floats a `1.0f` — pone cada byte a `0x01`, lo que en floats resulta en `2.36e-38`, no `1.0`.
+- Para inicializar a valores no-uniformes: usa `cudaMemcpy` desde un buffer de host o lanza un kernel de inicialización.
 
 ```c
-cudaMemset(d_A, 0, N * sizeof(float));   // pone a cero
+// ✅ correcto: poner a cero (todos los bytes 0 = float 0.0f, int 0)
+CUDA_CHECK(cudaMemset(d_A, 0, N * sizeof(float)));
+
+// ❌ incorrecto: NO pone los floats a 1.0
+CUDA_CHECK(cudaMemset(d_A, 1, N * sizeof(float)));
+
+// ✅ para valores arbitrarios: kernel de init
+initKernel<<<grid, block>>>(d_A, 1.0f, N);
 ```
 
 | Parámetro | Significado |
 |---|---|
-| `devPtr` | Puntero device |
+| `devPtr` | Puntero device a inicializar |
 | `value` | Byte a escribir (0–255) |
 | `bytes` | Cuántos bytes escribir |
 
@@ -533,40 +614,65 @@ cudaMemset(d_A, 0, N * sizeof(float));   // pone a cero
 cudaMemcpyAsync(dst, src, bytes, direction, stream);
 ```
 
-Igual que `cudaMemcpy` pero no bloquea al host. Requiere memoria pinned en el host para ser realmente asíncrona.
+Versión no-bloqueante de `cudaMemcpy`: encola la copia en un stream y devuelve el control al host inmediatamente. Es la pieza clave para **solapar transferencias con cómputo** (ver §3.15).
+
+- Requiere memoria **pinned** en el host (`cudaMallocHost`); con memoria paginable se degrada silenciosamente a copia síncrona.
+- Tras lanzarla, el buffer de origen **no se puede modificar** ni el de destino leer hasta que la copia termine. Sincronizar con `cudaStreamSynchronize` o `cudaEvent`.
+- Si se usa el stream `0` (stream por defecto), la copia se serializa con todo lo demás → no hay solapamiento real.
 
 ```c
-cudaMemcpyAsync(d_A, h_A, N * sizeof(float),
-                cudaMemcpyHostToDevice, stream);
+cudaStream_t s;
+CUDA_CHECK(cudaStreamCreate(&s));
+
+// Lanza copia y kernel en paralelo (en streams distintos)
+CUDA_CHECK(cudaMemcpyAsync(d_A, h_A, bytes, cudaMemcpyHostToDevice, s));
+kernel<<<grid, block, 0, s>>>(d_A, d_B);   // mismo stream s → orden garantizado
+CUDA_CHECK(cudaMemcpyAsync(h_B, d_B, bytes, cudaMemcpyDeviceToHost, s));
+
+CUDA_CHECK(cudaStreamSynchronize(s));      // esperar a que todo termine
+CUDA_CHECK(cudaStreamDestroy(s));
 ```
 
 | Parámetro | Significado |
 |---|---|
 | `dst`, `src`, `bytes`, `direction` | Igual que `cudaMemcpy` |
-| `stream` | Stream donde se encola la operación |
+| `stream` | Stream donde se encola la operación (≠ 0 para solape real) |
 
 #### 3.9.5 `cudaMemcpyToSymbol` / `cudaMemcpyFromSymbol`
 
 ```c
 cudaMemcpyToSymbol(symbol, src, bytes);
-cudaMemcpyFromSymbol(dst, symbol, bytes);
+9;
 ```
 
-Copian datos entre el host y una variable global del device (`__device__` o `__constant__`), identificándola por **nombre del símbolo**. Es el puente típico para inicializar `__constant__`.
+Copian datos entre el host y una **variable global del device** declarada con `__device__` o `__constant__`, identificándola por **nombre del símbolo** (no por puntero). Necesario porque las variables `__constant__` y `__device__` viven en espacios de memoria especiales a los que el host no tiene puntero directo.
+
+- Es el puente típico para **inicializar `__constant__`**: parámetros de filtros, coeficientes, lookup tables pequeñas.
+- El `symbol` se pasa por nombre, sin `&`: el compilador lo resuelve a la dirección device correcta.
+- Por defecto es síncrono; hay variantes `Async` que reciben un `stream`.
+- Las versiones modernas también aceptan un puntero device obtenido vía `cudaGetSymbolAddress`, pero el patrón clásico es pasar el símbolo directamente.
 
 ```c
-__constant__ float coeffs[256];
-// ...
-cudaMemcpyToSymbol(coeffs, h_coeffs, 256 * sizeof(float));
+__constant__ float coeffs[256];          // vive en constant memory del device
+
+void initFilter(const float *h_coeffs) {
+    // Host → constant memory del device
+    CUDA_CHECK(cudaMemcpyToSymbol(coeffs, h_coeffs, 256 * sizeof(float)));
+}
+
+__global__ void applyFilter(float *data, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) data[i] *= coeffs[i % 256];   // lectura por broadcast, ~1 ciclo
+}
 ```
 
 | Parámetro | Significado |
 |---|---|
-| `symbol` | Variable global del device (por nombre) |
+| `symbol` | Variable global del device (por nombre, sin `&`) |
 | `src` / `dst` | Puntero en el host (origen en `To`, destino en `From`) |
 | `bytes` | Bytes a copiar |
-| `offset` *(opcional)* | Desplazamiento dentro del símbolo |
-| `kind` *(opcional)* | Dirección de la copia |
+| `offset` *(opcional)* | Desplazamiento en bytes dentro del símbolo |
+| `kind` *(opcional)* | Dirección de la copia (default: la inferida según `To`/`From`) |
 
 ### 3.10 Sincronización
 
